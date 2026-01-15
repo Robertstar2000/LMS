@@ -1,557 +1,463 @@
-
 import React, { useMemo, useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { courses as baseCourses } from '../data';
-import { Course, User, UserRole, Module, Lesson, QuizQuestion } from '../types';
+import { Link, useNavigate } from 'react-router-dom';
+import { Course, User, Enrollment, Module } from '../types';
+import { TallmanAPI } from '../backend-server';
+import { generateCourseOutline, generateUnitContent, generateCourseThumbnail } from '../geminiService';
 
 const AdminDashboard: React.FC = () => {
-  const [users, setUsers] = useState<User[]>([]);
-  const [customCourses, setCustomCourses] = useState<Course[]>([]);
-  const [selectedStat, setSelectedStat] = useState<string | null>(null);
-  const [editingCourse, setEditingCourse] = useState<Course | null>(null);
-  const location = useLocation();
   const navigate = useNavigate();
-
-  const loadData = () => {
-    const storedUsers = localStorage.getItem('tallman_workforce_users');
-    if (storedUsers) setUsers(JSON.parse(storedUsers));
-
-    const storedCourses = localStorage.getItem('tallman_lms_courses');
-    if (storedCourses) {
-      setCustomCourses(JSON.parse(storedCourses));
-    }
-  };
-
-  const handleWipeStorage = () => {
-    if (window.confirm("DANGER: This will permanently erase ALL generated courses and workforce data. This is used for system resets only. Proceed?")) {
-      localStorage.removeItem('tallman_lms_courses');
-      localStorage.removeItem('tallman_last_created_id');
-      setCustomCourses([]);
-      alert("System library purged.");
-      window.location.reload();
-    }
+  const [users, setUsers] = useState<User[]>([]);
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
+  const [selectedStat, setSelectedStat] = useState<string | null>(null);
+  const [regenProgress, setRegenProgress] = useState<Record<string, { current: number, total: number, status: string }>>({});
+  const [isSyncingThumbnail, setIsSyncingThumbnail] = useState<Record<string, boolean>>({});
+  const [confirmModal, setConfirmModal] = useState<{ isOpen: boolean, course: Course | null }>({ isOpen: false, course: null });
+  
+  const refreshData = async () => {
+    const [u, c, e] = await Promise.all([
+      TallmanAPI.getUsers(),
+      TallmanAPI.getCourses(),
+      TallmanAPI.getEnrollments()
+    ]);
+    setUsers(u);
+    setCourses(c);
+    setEnrollments(e);
   };
 
   useEffect(() => {
-    loadData();
-    window.addEventListener('storage', loadData);
-    window.addEventListener('focus', loadData);
-    return () => {
-      window.removeEventListener('storage', loadData);
-      window.removeEventListener('focus', loadData);
-    };
+    refreshData();
+    const interval = setInterval(refreshData, 10000); 
+    return () => clearInterval(interval);
   }, []);
 
-  const allCourses = useMemo(() => {
-    const courseMap = new Map<string, Course>();
-    baseCourses.forEach(c => courseMap.set(c.course_id, c));
-    customCourses.forEach(c => courseMap.set(c.course_id, c));
-    return Array.from(courseMap.values());
-  }, [customCourses]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const editId = params.get('edit');
-    if (editId) {
-      const courseToEdit = allCourses.find(c => c.course_id === editId);
-      if (courseToEdit) {
-        setEditingCourse(courseToEdit);
-      }
+  const handleRefreshThumbnail = async (course: Course) => {
+    if (isSyncingThumbnail[course.course_id]) return;
+    setIsSyncingThumbnail(prev => ({ ...prev, [course.course_id]: true }));
+    try {
+      const newUrl = await generateCourseThumbnail(course.course_name);
+      await TallmanAPI.updateCourse({ ...course, thumbnail_url: newUrl });
+      await refreshData();
+    } catch (err) {
+      console.error(err);
+      alert("Visual Sync failed. Check network integrity.");
+    } finally {
+      setIsSyncingThumbnail(prev => ({ ...prev, [course.course_id]: false }));
     }
-  }, [location.search, allCourses]);
+  };
 
-  const stats = [
-    { id: 'users', label: 'Total Users', value: users.length.toLocaleString(), icon: '👥' },
-    { id: 'active', label: 'Active Learners', value: '1,240', icon: '🔥' },
-    { id: 'completions', label: 'Course Completions', value: '432', icon: '🎓' },
-    { id: 'revenue', label: 'Credits Issued', value: '12,500', icon: '💎' },
-  ];
-
-  const handleSaveCourse = (updatedCourse: Course) => {
-    const storedCourses = localStorage.getItem('tallman_lms_courses');
-    let courses: Course[] = storedCourses ? JSON.parse(storedCourses) : [];
+  const handleRegenerate = async (course: Course) => {
+    setConfirmModal({ isOpen: false, course: null });
+    if (regenProgress[course.course_id]) return;
     
-    const existingIdx = courses.findIndex(c => c.course_id === updatedCourse.course_id);
-    if (existingIdx > -1) {
-      courses[existingIdx] = updatedCourse;
-    } else {
-      courses.push(updatedCourse);
-    }
-    
-    localStorage.setItem('tallman_lms_courses', JSON.stringify(courses));
-    setCustomCourses(courses);
-    setEditingCourse(null);
-    navigate('/admin', { replace: true });
-  };
+    setRegenProgress(prev => ({ 
+      ...prev, 
+      [course.course_id]: { current: 0, total: 1, status: 'Initializing Architect...' } 
+    }));
 
-  const handleDeleteCourse = (courseId: string) => {
-    const isBase = baseCourses.some(c => c.course_id === courseId);
-    if (isBase) {
-      alert("Base curriculum cannot be deleted.");
-      return;
-    }
+    try {
+      setStatus(course.course_id, 'Updating visual identity...');
+      const thumbnailUrl = await generateCourseThumbnail(course.course_name);
 
-    if (window.confirm("Are you sure you want to permanently discard this curriculum?")) {
-      const storedCourses = localStorage.getItem('tallman_lms_courses');
-      if (storedCourses) {
-        const courses: Course[] = JSON.parse(storedCourses);
-        const filtered = courses.filter(c => c.course_id !== courseId);
-        localStorage.setItem('tallman_lms_courses', JSON.stringify(filtered));
-        setCustomCourses(filtered);
+      const outline = await generateCourseOutline(course.course_name);
+      const { titles } = outline;
+      const total = titles.length;
+      
+      const updatedModules: Module[] = [];
+      
+      setRegenProgress(prev => ({ 
+        ...prev, 
+        [course.course_id]: { ...prev[course.course_id], total, status: 'Outline Verified.' } 
+      }));
+
+      for (let i = 0; i < total; i++) {
+        // Cooldown for 429 mitigation
+        if (i > 0) {
+          setStatus(course.course_id, 'Cooling down AI engines...');
+          await new Promise(r => setTimeout(r, 4000));
+        }
+
+        setRegenProgress(prev => ({ 
+          ...prev, 
+          [course.course_id]: { ...prev[course.course_id], current: i + 1, status: `Drafting: ${titles[i]}` } 
+        }));
+        
+        const unitData = await generateUnitContent(course.course_name, titles[i]);
+        const moduleId = `m_${course.course_id}_${i}_${Date.now()}`;
+        
+        updatedModules.push({
+          module_id: moduleId,
+          course_id: course.course_id,
+          module_title: titles[i],
+          position: i,
+          lessons: [
+            {
+              lesson_id: `l_${moduleId}_doc`,
+              module_id: moduleId,
+              lesson_title: `${titles[i]}: Technical Manual`,
+              lesson_type: 'document',
+              duration_minutes: 45,
+              content: unitData.content
+            },
+            {
+              lesson_id: `l_${moduleId}_quiz`,
+              module_id: moduleId,
+              lesson_title: `${titles[i]}: Safety Audit`,
+              lesson_type: 'quiz',
+              duration_minutes: 15,
+              quiz_questions: unitData.quiz
+            }
+          ]
+        });
       }
-      setEditingCourse(null);
-      navigate('/admin', { replace: true });
+
+      const updatedCourse = { ...course, modules: updatedModules, thumbnail_url: thumbnailUrl };
+      await TallmanAPI.updateCourse(updatedCourse);
+      
+      await TallmanAPI.resetEnrollmentsForCourse(course.course_id);
+      
+      await refreshData();
+      
+      setRegenProgress(prev => {
+        const next = { ...prev };
+        delete next[course.course_id];
+        return next;
+      });
+      alert(`Course "${course.course_name}" successfully re-architected. 4000-word manuals generated. All technician progress reset for compliance.`);
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message?.includes('429') 
+        ? "Regeneration paused due to AI rate limits. Please wait 60 seconds and try again." 
+        : "Regeneration failure. Industrial service timeout.");
+      setRegenProgress(prev => {
+        const next = { ...prev };
+        delete next[course.course_id];
+        return next;
+      });
     }
   };
 
-  const closeEditor = () => {
-    setEditingCourse(null);
-    navigate('/admin', { replace: true });
-  };
+  const setStatus = (id: string, status: string) => {
+    setRegenProgress(prev => ({
+      ...prev,
+      [id]: { ...prev[id], status }
+    }));
+  }
+
+  const stats = useMemo(() => {
+    const activeLearnerIds = new Set(
+      enrollments
+        .filter(e => e.status === 'active' && e.progress_percent > 0 && e.progress_percent < 100)
+        .map(e => e.user_id)
+    );
+    const totalCompletions = enrollments.filter(e => e.progress_percent === 100).length;
+    const totalXP = users.reduce((acc, u) => acc + (u.points || 0), 0);
+
+    return [
+      { id: 'users', label: 'Total Users', value: users.length.toLocaleString(), icon: '👥' },
+      { id: 'active', label: 'Active Learners', value: activeLearnerIds.size.toLocaleString(), icon: '🔥' },
+      { id: 'completions', label: 'Course Completions', value: totalCompletions.toLocaleString(), icon: '🎓' },
+      { id: 'revenue', label: 'Credits Issued (XP)', value: totalXP.toLocaleString(), icon: '💎' },
+    ];
+  }, [users, enrollments]);
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-top-4 duration-500 relative pb-32">
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight underline decoration-indigo-200 decoration-4 underline-offset-4">Tallman Console</h1>
-          <p className="text-slate-500">Corporate Governance & Content Mastering.</p>
+          <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight underline decoration-indigo-200 decoration-4 underline-offset-4 uppercase italic">Tallman Console</h1>
+          <p className="text-slate-500 font-medium">Real-time enterprise metrics and curriculum mastering.</p>
         </div>
         <div className="flex gap-3">
-          <button 
-            onClick={handleWipeStorage}
-            className="px-6 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-rose-600 hover:text-white transition-all active:scale-95"
-          >
-            Reset System
-          </button>
-          <Link to="/admin/courses" className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all active:scale-95">
+          <Link to="/admin/courses" className="px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all active:scale-95 text-xs uppercase tracking-widest">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4"/></svg>
-            New AI Curriculum
+            Architect New Path
           </Link>
         </div>
       </header>
-
-      <section className="bg-white rounded-[3rem] border-2 border-slate-100 shadow-xl overflow-hidden text-slate-900">
-        <div className="p-8 border-b flex items-center justify-between bg-slate-50/50">
-          <div className="flex items-center gap-4">
-             <div className="w-10 h-10 bg-indigo-600 text-white rounded-xl flex items-center justify-center font-black">⚙️</div>
-             <div>
-               <h2 className="text-xl font-black text-slate-900">Curriculum Mastering Lab</h2>
-               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Master Edit AI generated tracks</p>
-             </div>
-          </div>
-          <button onClick={loadData} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 px-4 py-2 bg-indigo-50 rounded-full hover:bg-indigo-100 transition-colors">
-             Sync Library ({allCourses.length})
-          </button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead className="bg-white text-slate-400 text-[10px] uppercase font-black tracking-[0.2em] border-b">
-              <tr>
-                <th className="px-10 py-6">Course Path</th>
-                <th className="px-10 py-6">Identity Key</th>
-                <th className="px-10 py-6 text-right">Engineering</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {allCourses.map((course) => (
-                <tr key={course.course_id} className="hover:bg-slate-50 transition-colors group">
-                  <td className="px-10 py-8">
-                    <div className="flex items-center gap-4">
-                       <img src={course.thumbnail_url} className="w-16 h-10 rounded-xl object-cover border shadow-sm" alt="" />
-                       <span className="font-black text-slate-900 text-lg">{course.course_name}</span>
-                    </div>
-                  </td>
-                  <td className="px-10 py-8">
-                    <span className="text-[10px] font-mono bg-slate-100 px-3 py-1 rounded-lg text-slate-500 uppercase">{course.course_id}</span>
-                  </td>
-                  <td className="px-10 py-8 text-right">
-                    <button 
-                      onClick={() => setEditingCourse(course)}
-                      className="px-6 py-3 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-900 transition-all shadow-md active:scale-95"
-                    >
-                      Master Edit
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {stats.map((stat) => (
           <button 
             key={stat.id} 
             onClick={() => setSelectedStat(selectedStat === stat.id ? null : stat.id)}
-            className={`text-left p-6 rounded-[2.5rem] border-2 transition-all ${
-              selectedStat === stat.id ? 'bg-indigo-600 border-indigo-600 text-white shadow-xl' : 'bg-white border-slate-100 hover:border-indigo-200'
+            className={`text-left p-8 rounded-[2.5rem] border-2 transition-all shadow-sm group ${
+              selectedStat === stat.id ? 'bg-indigo-600 border-indigo-600 text-white shadow-xl scale-105' : 'bg-white border-slate-100 hover:border-indigo-200 hover:shadow-md'
             }`}
           >
-            <div className="flex justify-between items-start mb-4">
-              <span className="text-3xl">{stat.icon}</span>
+            <div className="flex justify-between items-start mb-6">
+              <span className="text-4xl grayscale group-hover:grayscale-0 transition-all">{stat.icon}</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             </div>
-            <p className={`text-[10px] font-black uppercase tracking-widest ${selectedStat === stat.id ? 'text-indigo-100' : 'text-slate-400'}`}>{stat.label}</p>
-            <h3 className="text-3xl font-black mt-1">{stat.value}</h3>
+            <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${selectedStat === stat.id ? 'text-indigo-100' : 'text-slate-400'}`}>{stat.label}</p>
+            <h3 className="text-4xl font-black mt-1 tracking-tighter">{stat.value}</h3>
           </button>
         ))}
       </div>
 
       {selectedStat && (
-        <div className="animate-in slide-in-from-bottom-4 duration-500 bg-white rounded-[3rem] border-2 border-indigo-100 p-10 shadow-2xl">
+        <div className="animate-in slide-in-from-bottom-4 duration-500 bg-white rounded-[3rem] border-2 border-indigo-100 p-10 shadow-2xl relative overflow-hidden">
+           <div className="absolute right-0 top-0 opacity-5 text-9xl font-black select-none p-10 uppercase italic">AUDIT</div>
            {selectedStat === 'users' && <UserList users={users} />}
-           {selectedStat === 'active' && <ActiveLearnersList users={users} courses={allCourses} />}
-           {selectedStat === 'completions' && <CompletionMetrics courses={allCourses} users={users} />}
+           {selectedStat === 'active' && <ActiveLearnersList enrollments={enrollments} users={users} courses={courses} />}
+           {selectedStat === 'completions' && <CompletionMetrics enrollments={enrollments} courses={courses} users={users} />}
+           {selectedStat === 'revenue' && <XPLeaderboard users={users} />}
         </div>
       )}
 
-      {editingCourse && (
-        <CourseEditor 
-          key={editingCourse.course_id} 
-          course={editingCourse} 
-          onSave={handleSaveCourse} 
-          onDelete={handleDeleteCourse}
-          onCancel={closeEditor} 
-        />
+      <section className="bg-white rounded-[3.5rem] border-2 border-slate-100 shadow-xl overflow-hidden text-slate-900">
+        <div className="p-10 border-b flex items-center justify-between bg-slate-50/50">
+          <div className="flex items-center gap-5">
+             <div className="w-12 h-12 bg-slate-900 text-white rounded-2xl flex items-center justify-center text-xl">🛠️</div>
+             <div>
+               <h2 className="text-2xl font-black text-slate-900 tracking-tighter uppercase italic">Curriculum Mastering</h2>
+               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Administrative AI Orchestration</p>
+             </div>
+          </div>
+          <Link to="/admin/reports" className="text-[10px] font-black uppercase tracking-widest bg-white border-2 border-slate-100 px-6 py-3 rounded-xl hover:border-indigo-600 transition-all">
+             Detailed Analytics
+          </Link>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-white text-slate-400 text-[10px] uppercase font-black tracking-[0.25em] border-b">
+              <tr>
+                <th className="px-10 py-8">Technical Path</th>
+                <th className="px-10 py-8">Enrollments</th>
+                <th className="px-10 py-8 text-right">Engineering</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {courses.map((course) => {
+                const isRegenerating = !!regenProgress[course.course_id];
+                const isSyncing = isSyncingThumbnail[course.course_id];
+                const progress = regenProgress[course.course_id];
+                
+                return (
+                  <tr key={course.course_id} className="hover:bg-slate-50 transition-colors group">
+                    <td className="px-10 py-8">
+                      <div className="flex items-center gap-5">
+                         <div className="relative">
+                           <img src={course.thumbnail_url} className={`w-20 h-12 rounded-xl object-cover border shadow-sm transition-all ${isSyncing ? 'opacity-30 blur-sm' : 'grayscale group-hover:grayscale-0'}`} alt="" />
+                           {isSyncing && (
+                             <div className="absolute inset-0 flex items-center justify-center">
+                               <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent animate-spin rounded-full"></div>
+                             </div>
+                           )}
+                         </div>
+                         <div>
+                           <span className="font-black text-slate-900 text-xl block leading-tight">{course.course_name}</span>
+                           <span className="text-[9px] font-mono text-slate-400 uppercase mt-1">{course.course_id}</span>
+                         </div>
+                      </div>
+                    </td>
+                    <td className="px-10 py-8">
+                      {isRegenerating ? (
+                        <div className="space-y-2 max-w-[200px]">
+                           <div className="flex justify-between items-center text-[9px] font-black text-indigo-600 uppercase">
+                              <span>Architecting...</span>
+                              <span>{progress.current}/{progress.total}</span>
+                           </div>
+                           <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className="bg-indigo-600 h-full transition-all duration-300" style={{ width: `${(progress.current / progress.total) * 100}%` }}></div>
+                           </div>
+                           <p className="text-[8px] font-bold text-slate-400 truncate uppercase">{progress.status}</p>
+                        </div>
+                      ) : (
+                        <span className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-black">
+                          {enrollments.filter(e => e.course_id === course.course_id).length} Active
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-10 py-8 text-right">
+                      <div className="flex items-center justify-end gap-3">
+                        <button 
+                          disabled={isRegenerating || isSyncing}
+                          onClick={() => handleRefreshThumbnail(course)}
+                          className={`px-4 py-3 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all active:scale-95 flex items-center gap-2 ${
+                            isSyncing 
+                              ? 'bg-slate-50 text-slate-300' 
+                              : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white'
+                          }`}
+                          title="Nano Banana Visual Refresh"
+                        >
+                          <svg className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h14a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                          Visual Sync
+                        </button>
+                        <button 
+                          disabled={isRegenerating || isSyncing}
+                          onClick={() => setConfirmModal({ isOpen: true, course })}
+                          className={`px-4 py-3 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all active:scale-95 flex items-center gap-2 ${
+                            isRegenerating 
+                              ? 'bg-slate-50 text-slate-300 cursor-not-allowed' 
+                              : 'bg-amber-100 text-amber-700 hover:bg-amber-600 hover:text-white'
+                          }`}
+                        >
+                          <svg className={`w-3 h-3 ${isRegenerating ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                          Re-Architect
+                        </button>
+                        <button 
+                          disabled={isRegenerating || isSyncing}
+                          onClick={() => navigate(`/admin/edit/${course.course_id}`)}
+                          className="px-6 py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600 transition-all active:scale-95 disabled:opacity-30"
+                        >
+                          Manual Edit
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* RE-ARCHITECT CONFIRMATION MODAL */}
+      {confirmModal.isOpen && confirmModal.course && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-slate-950/80 backdrop-blur-xl animate-in fade-in duration-300">
+           <div className="bg-white w-full max-w-xl rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-white animate-in zoom-in-95 duration-500">
+              <div className="p-12 text-center space-y-8">
+                <div className="w-24 h-24 bg-amber-100 text-amber-600 rounded-[2rem] flex items-center justify-center text-5xl mx-auto shadow-inner">⚠️</div>
+                <div className="space-y-3">
+                  <h2 className="text-4xl font-black text-slate-900 tracking-tighter uppercase italic leading-none">Global Reset Warning</h2>
+                  <p className="text-slate-500 font-bold uppercase tracking-widest text-xs text-rose-500">Learner Progress Purge Required</p>
+                </div>
+                <div className="p-8 bg-slate-50 rounded-[2.5rem] border-2 border-slate-100 text-left space-y-4">
+                  <p className="text-slate-600 leading-relaxed font-medium">
+                    You are triggering a **Master Re-Architecture** for <span className="font-black text-slate-900">"{confirmModal.course.course_name}"</span>. 
+                  </p>
+                  <p className="text-slate-600 leading-relaxed font-bold bg-rose-50 p-4 rounded-xl border border-rose-100">
+                    IMPORTANT: Because technical SOPs are changing, ALL technician progress for this course will be reset to 0%. They must re-verify against the new architecture.
+                  </p>
+                </div>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => setConfirmModal({ isOpen: false, course: null })}
+                    className="flex-1 py-6 bg-slate-100 text-slate-500 rounded-3xl font-black uppercase text-xs tracking-widest hover:bg-slate-200 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={() => handleRegenerate(confirmModal.course!)}
+                    className="flex-2 py-6 bg-amber-600 text-white rounded-3xl font-black uppercase text-xs tracking-widest shadow-2xl hover:bg-slate-900 transition-all active:scale-95"
+                  >
+                    Confirm & Reset All Learners
+                  </button>
+                </div>
+              </div>
+           </div>
+        </div>
       )}
     </div>
   );
 };
 
+// Internal sub-components
 const UserList: React.FC<{ users: User[] }> = ({ users }) => (
   <div className="space-y-4">
-    <h3 className="text-xl font-black mb-6">Workforce Roster</h3>
-    <table className="w-full text-left">
-      <thead>
-        <tr className="text-[10px] uppercase font-black tracking-widest text-slate-400 border-b">
-          <th className="pb-4">Name</th>
-          <th className="pb-4">Role</th>
-          <th className="pb-4 text-right">Points</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-slate-50">
-        {users.map(u => (
-          <tr key={u.user_id} className="hover:bg-slate-50">
-            <td className="py-4 font-bold text-slate-800">{u.display_name}</td>
-            <td className="py-4 text-[10px] font-black text-slate-400 uppercase">{u.role}</td>
-            <td className="py-4 text-right font-mono font-bold text-indigo-600">{u.points}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
-);
-
-const ActiveLearnersList: React.FC<{ users: User[]; courses: Course[] }> = ({ users, courses }) => (
-  <div className="space-y-4">
-    <h3 className="text-xl font-black mb-6">Real-time Enrollment Monitoring</h3>
-    {users.slice(0, 8).map((u, i) => (
-      <div key={u.user_id} className="p-6 bg-slate-50 rounded-2xl flex items-center justify-between border">
-        <div className="flex items-center gap-4">
-          <div className="w-10 h-10 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-black">👤</div>
+    <h3 className="text-2xl font-black mb-8 tracking-tighter uppercase italic text-slate-900">Workforce Registry</h3>
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {users.map(u => (
+        <div key={u.user_id} className="p-6 bg-slate-50 border rounded-3xl flex items-center gap-4">
+          <img src={u.avatar_url} className="w-12 h-12 rounded-xl object-cover shadow-sm" alt="" />
           <div>
             <p className="font-black text-slate-900">{u.display_name}</p>
-            <p className="text-[10px] font-black text-slate-400 uppercase">Path: {courses[i % courses.length]?.course_name}</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase">{u.roles.join(' / ')}</p>
           </div>
         </div>
-        <div className="w-32 h-2 bg-slate-200 rounded-full overflow-hidden">
-          <div className="bg-indigo-600 h-full" style={{ width: `${30 + (i * 10)}%` }}></div>
-        </div>
-      </div>
-    ))}
+      ))}
+    </div>
   </div>
 );
 
-const CompletionMetrics: React.FC<{ courses: Course[]; users: User[] }> = ({ courses, users }) => (
-  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-    <h3 className="col-span-full text-xl font-black mb-2">Graduation Audit</h3>
-    {courses.map(c => (
-      <div key={c.course_id} className="p-8 border rounded-[2rem] bg-white hover:border-indigo-600 transition-all">
-        <h4 className="font-black text-slate-900 mb-4">{c.course_name}</h4>
-        <div className="flex flex-wrap gap-2">
-          {users.slice(0, 5).map((u, i) => (
-            <span key={i} className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-black uppercase">Certified: {u.display_name}</span>
-          ))}
-        </div>
-      </div>
-    ))}
-  </div>
-);
-
-const CourseEditor: React.FC<{ course: Course; onSave: (c: Course) => void; onDelete: (id: string) => void; onCancel: () => void }> = ({ course, onSave, onDelete, onCancel }) => {
-  const [edited, setEdited] = useState<Course>({ 
-    ...course, 
-    modules: course.modules || [] 
-  });
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-
-  const updateModule = (idx: number, updated: Module) => {
-    const mods = [...(edited.modules || [])];
-    mods[idx] = updated;
-    setEdited({ ...edited, modules: mods });
-    setHasUnsavedChanges(true);
-  };
-
-  const handleCancel = () => {
-    if (hasUnsavedChanges && !window.confirm("You have unsaved edits. Discard changes?")) return;
-    onCancel();
-  };
-
-  const addLesson = (mIdx: number) => {
-    const mod = edited.modules![mIdx];
-    const newLesson: Lesson = {
-      lesson_id: `l_${Date.now()}`,
-      module_id: mod.module_id,
-      lesson_title: 'New Technical Insight',
-      lesson_type: 'document',
-      duration_minutes: 10,
-      content: 'Enter professional content...'
-    };
-    updateModule(mIdx, { ...mod, lessons: [...mod.lessons, newLesson] });
-  };
-
-  const addQuizQuestion = (mIdx: number, lIdx: number) => {
-    const mod = edited.modules![mIdx];
-    const lesson = mod.lessons[lIdx];
-    const newQuestion: QuizQuestion = {
-      question: 'New Audit Question',
-      options: ['Option A', 'Option B', 'Option C', 'Option D'],
-      correctIndex: 0
-    };
-    const updatedLessons = [...mod.lessons];
-    updatedLessons[lIdx] = {
-      ...lesson,
-      quiz_questions: [...(lesson.quiz_questions || []), newQuestion]
-    };
-    updateModule(mIdx, { ...mod, lessons: updatedLessons });
-  };
-
-  const removeQuizQuestion = (mIdx: number, lIdx: number, qIdx: number) => {
-    const mod = edited.modules![mIdx];
-    const lesson = mod.lessons[lIdx];
-    const updatedQuestions = [...(lesson.quiz_questions || [])];
-    updatedQuestions.splice(qIdx, 1);
-    const updatedLessons = [...mod.lessons];
-    updatedLessons[lIdx] = {
-      ...lesson,
-      quiz_questions: updatedQuestions
-    };
-    updateModule(mIdx, { ...mod, lessons: updatedLessons });
-  };
-
+const ActiveLearnersList: React.FC<{ enrollments: Enrollment[]; users: User[]; courses: Course[] }> = ({ enrollments, users, courses }) => {
+  const activeEntries = enrollments.filter(e => e.progress_percent > 0 && e.progress_percent < 100);
   return (
-    <div className="fixed inset-0 z-[300] bg-slate-900/95 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-300">
-      <div className="w-full max-w-7xl h-[90vh] bg-white rounded-[4rem] shadow-2xl flex flex-col overflow-hidden border-4 border-indigo-500/10">
-        <header className="p-8 border-b bg-slate-50 flex items-center justify-between sticky top-0 z-10 shadow-sm">
-          <div className="flex items-center gap-6">
-            <button 
-              onClick={handleCancel} 
-              className="w-12 h-12 flex items-center justify-center bg-white border-2 border-slate-100 text-slate-400 rounded-2xl hover:text-indigo-600 transition-all hover:bg-slate-50"
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-            </button>
-            <div className="flex flex-col border-l pl-6">
-              <h2 className="text-2xl font-black text-slate-900 tracking-tighter">Master Content Architect</h2>
-              {hasUnsavedChanges && <span className="text-[9px] font-black text-amber-500 uppercase tracking-widest mt-0.5">● Unsaved Edits Present</span>}
+    <div className="space-y-6">
+      <h3 className="text-2xl font-black mb-8 tracking-tighter uppercase italic text-slate-900">Real-Time Progression Audit</h3>
+      {activeEntries.length === 0 ? (
+        <div className="py-20 text-center text-slate-400 font-black uppercase italic tracking-widest">No active study sessions detected.</div>
+      ) : activeEntries.map((e) => {
+        const user = users.find(u => u.user_id === e.user_id);
+        const course = courses.find(c => c.course_id === e.course_id);
+        return (
+          <div key={e.enrollment_id} className="p-6 bg-slate-50 rounded-3xl flex items-center justify-between border hover:border-indigo-300 transition-all">
+            <div className="flex items-center gap-5">
+              <div className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center font-black">👤</div>
+              <div>
+                <p className="font-black text-slate-900">{user?.display_name || 'Unknown User'}</p>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{course?.course_name || 'Loading Path...'}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="text-right">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Live Progress</p>
+                <p className="font-black text-indigo-600 text-xl">{e.progress_percent}%</p>
+              </div>
+              <div className="w-32 h-3 bg-slate-200 rounded-full overflow-hidden border border-slate-100">
+                <div className="bg-indigo-600 h-full transition-all duration-1000" style={{ width: `${e.progress_percent}%` }}></div>
+              </div>
             </div>
           </div>
-          <div className="flex gap-4">
-            <button 
-              onClick={() => onDelete(edited.course_id)} 
-              className="px-6 py-4 text-rose-500 font-black uppercase text-[10px] hover:bg-rose-50 rounded-2xl transition-all"
-            >
-              Discard Track
-            </button>
-            <button 
-              onClick={() => onSave(edited)} 
-              className="px-10 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-[10px] shadow-xl shadow-indigo-200 hover:bg-indigo-700 transition-all active:scale-95"
-            >
-              Publish Content
-            </button>
-          </div>
-        </header>
+        );
+      })}
+    </div>
+  );
+};
 
-        <div className="flex-1 flex overflow-hidden">
-          <aside className="w-80 border-r p-6 bg-slate-50/50 overflow-y-auto space-y-2 custom-scrollbar">
-            <h3 className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">Module Selection</h3>
-            {edited.modules?.map((m, i) => (
-              <button 
-                key={m.module_id}
-                onClick={() => setActiveIdx(i)}
-                className={`w-full text-left p-4 rounded-2xl font-black text-xs transition-all flex items-center gap-3 ${
-                  activeIdx === i ? 'bg-indigo-600 text-white shadow-lg translate-x-1' : 'bg-white text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                <span className={`w-5 h-5 rounded-md flex items-center justify-center text-[9px] ${activeIdx === i ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-400'}`}>
-                  {i + 1}
-                </span>
-                <span className="truncate">{m.module_title}</span>
-              </button>
-            ))}
-          </aside>
-
-          <main className="flex-1 p-10 overflow-y-auto bg-white custom-scrollbar">
-            {edited.modules?.[activeIdx] ? (
-              <div className="max-w-4xl mx-auto space-y-12">
-                <div className="flex items-center justify-between border-b-2 border-slate-50 pb-8">
-                  <div>
-                    <h3 className="text-3xl font-black text-slate-900 tracking-tighter uppercase italic">Unit {activeIdx + 1} Workbench</h3>
-                    <p className="text-slate-400 text-sm font-medium mt-1">Configure lessons and assessments for this module.</p>
-                  </div>
-                  <button onClick={() => addLesson(activeIdx)} className="px-5 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-black text-[10px] hover:bg-indigo-100 transition-all uppercase tracking-widest">+ Add Lesson Unit</button>
+const CompletionMetrics: React.FC<{ enrollments: Enrollment[]; courses: Course[]; users: User[] }> = ({ enrollments, courses, users }) => {
+  const completions = enrollments.filter(e => e.progress_percent === 100);
+  return (
+    <div className="space-y-8">
+      <h3 className="text-2xl font-black mb-8 tracking-tighter uppercase italic text-slate-900">Credential Issuance Ledger</h3>
+      {completions.length === 0 ? (
+        <div className="py-20 text-center text-slate-400 font-black uppercase italic tracking-widest">No certifications issued in current cycle.</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {completions.map(e => {
+            const user = users.find(u => u.user_id === e.user_id);
+            const course = courses.find(c => c.course_id === e.course_id);
+            return (
+              <div key={e.enrollment_id} className="p-8 border rounded-[2.5rem] bg-white hover:shadow-xl hover:border-emerald-500 transition-all group relative overflow-hidden">
+                <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:opacity-100 transition-opacity">
+                   <span className="text-4xl">📜</span>
                 </div>
-
-                <div className="space-y-10">
-                  {edited.modules[activeIdx].lessons.map((lesson, lIdx) => (
-                    <div key={lesson.lesson_id} className="p-10 bg-slate-50 border-2 border-slate-100 rounded-[3rem] space-y-6 shadow-sm hover:border-indigo-100 transition-all">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4 flex-1">
-                           <span className={`px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${lesson.lesson_type === 'quiz' ? 'bg-amber-100 text-amber-700 shadow-sm' : 'bg-indigo-100 text-indigo-700 shadow-sm'}`}>
-                             {lesson.lesson_type}
-                           </span>
-                           <input 
-                            className="flex-1 font-black text-xl text-slate-900 bg-transparent outline-none focus:border-b-2 border-indigo-600 min-w-[300px] placeholder:text-slate-300"
-                            placeholder="Unit Title..."
-                            value={lesson.lesson_title}
-                            onChange={e => {
-                              const mod = edited.modules![activeIdx];
-                              const lns = [...mod.lessons];
-                              lns[lIdx] = { ...lesson, lesson_title: e.target.value };
-                              updateModule(activeIdx, { ...mod, lessons: lns });
-                            }}
-                          />
-                        </div>
-                        <button 
-                          onClick={() => {
-                            if (!window.confirm("Remove this lesson unit?")) return;
-                            const mod = edited.modules![activeIdx];
-                            const lns = mod.lessons.filter((_, i) => i !== lIdx);
-                            updateModule(activeIdx, { ...mod, lessons: lns });
-                          }}
-                          className="text-[10px] font-black text-rose-500 uppercase hover:text-rose-700 px-4 py-2"
-                        >
-                          Remove Unit
-                        </button>
-                      </div>
-
-                      {lesson.lesson_type === 'document' && (
-                        <div className="space-y-2">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Manual Content (Markdown Supported)</label>
-                          <textarea 
-                            className="w-full p-8 bg-white border-2 border-slate-100 rounded-3xl h-80 text-sm font-medium focus:ring-4 focus:ring-indigo-50 outline-none focus:border-indigo-400 transition-all leading-relaxed"
-                            value={lesson.content}
-                            onChange={e => {
-                              const mod = edited.modules![activeIdx];
-                              const lns = [...mod.lessons];
-                              lns[lIdx] = { ...lesson, content: e.target.value };
-                              updateModule(activeIdx, { ...mod, lessons: lns });
-                            }}
-                          />
-                        </div>
-                      )}
-
-                      {lesson.lesson_type === 'quiz' && (
-                        <div className="space-y-8 pt-4">
-                          <div className="flex items-center justify-between border-b pb-4">
-                             <h4 className="text-[11px] font-black uppercase text-slate-400 tracking-widest">Assessment Engineering</h4>
-                             <button 
-                               onClick={() => addQuizQuestion(activeIdx, lIdx)}
-                               className="px-4 py-2 bg-white border-2 border-slate-200 rounded-xl text-[9px] font-black uppercase hover:bg-slate-50 hover:border-indigo-300 transition-all"
-                             >
-                               + New Test Question
-                             </button>
-                          </div>
-                          <div className="space-y-6">
-                            {lesson.quiz_questions?.map((q, qIndex) => (
-                              <div key={qIndex} className="bg-white p-8 border-2 border-slate-100 rounded-[2.5rem] space-y-6 shadow-sm relative group animate-in slide-in-from-top-2">
-                                <button 
-                                  onClick={() => removeQuizQuestion(activeIdx, lIdx, qIndex)}
-                                  className="absolute top-6 right-6 text-slate-300 hover:text-rose-500 transition-colors"
-                                  title="Remove Question"
-                                >
-                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12"/></svg>
-                                </button>
-                                
-                                <div className="space-y-2">
-                                  <label className="text-[10px] font-black uppercase text-indigo-400 tracking-widest">Question {qIndex + 1}</label>
-                                  <input 
-                                    className="w-full p-4 bg-slate-50 border-2 border-transparent rounded-2xl text-md font-bold outline-none focus:ring-4 focus:ring-indigo-50 focus:border-indigo-400 transition-all"
-                                    placeholder="Enter the technical question..."
-                                    value={q.question}
-                                    onChange={e => {
-                                      const mod = edited.modules![activeIdx];
-                                      const lns = [...mod.lessons];
-                                      const qs = [...(lns[lIdx].quiz_questions || [])];
-                                      qs[qIndex] = { ...q, question: e.target.value };
-                                      lns[lIdx] = { ...lns[lIdx], quiz_questions: qs };
-                                      updateModule(activeIdx, { ...mod, lessons: lns });
-                                    }}
-                                  />
-                                </div>
-
-                                <div className="space-y-3">
-                                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Choices (Select the correct answer)</label>
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {q.options.map((opt, oIdx) => (
-                                      <div key={oIdx} className={`flex items-center gap-3 p-3 rounded-2xl border-2 transition-all ${q.correctIndex === oIdx ? 'bg-emerald-50 border-emerald-500' : 'bg-slate-50 border-transparent hover:border-slate-200'}`}>
-                                        <input 
-                                          type="radio" 
-                                          name={`correct-${lesson.lesson_id}-${qIndex}`}
-                                          checked={q.correctIndex === oIdx}
-                                          onChange={() => {
-                                            const mod = edited.modules![activeIdx];
-                                            const lns = [...mod.lessons];
-                                            const qs = [...(lns[lIdx].quiz_questions || [])];
-                                            qs[qIndex] = { ...q, correctIndex: oIdx };
-                                            lns[lIdx] = { ...lns[lIdx], quiz_questions: qs };
-                                            updateModule(activeIdx, { ...mod, lessons: lns });
-                                          }}
-                                          className="w-5 h-5 accent-emerald-600 cursor-pointer"
-                                        />
-                                        <input 
-                                          className="flex-1 bg-transparent border-none text-sm font-bold outline-none placeholder:text-slate-300"
-                                          placeholder={`Choice ${oIdx + 1}`}
-                                          value={opt}
-                                          onChange={e => {
-                                            const mod = edited.modules![activeIdx];
-                                            const lns = [...mod.lessons];
-                                            const qs = [...(lns[lIdx].quiz_questions || [])];
-                                            const opts = [...q.options];
-                                            opts[oIdx] = e.target.value;
-                                            qs[qIndex] = { ...q, options: opts };
-                                            lns[lIdx] = { ...lns[lIdx], quiz_questions: qs };
-                                            updateModule(activeIdx, { ...mod, lessons: lns });
-                                          }}
-                                        />
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                <h4 className="font-black text-slate-900 text-xl mb-2">{course?.course_name}</h4>
+                <div className="flex items-center gap-3">
+                  <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Certified</div>
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Technician: {user?.display_name}</p>
                 </div>
+                <p className="text-[9px] text-slate-400 mt-4 font-mono">ENROLLMENT_ID: {e.enrollment_id}</p>
               </div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-4">
-                <div className="text-6xl">🧭</div>
-                <p className="font-black uppercase tracking-widest text-xs">Select a unit module to begin mastering content.</p>
-              </div>
-            )}
-          </main>
+            );
+          })}
         </div>
+      )}
+    </div>
+  );
+};
+
+const XPLeaderboard: React.FC<{ users: User[] }> = ({ users }) => {
+  const sorted = [...users].sort((a, b) => (b.points || 0) - (a.points || 0));
+  return (
+    <div className="space-y-6">
+      <h3 className="text-2xl font-black mb-8 tracking-tighter uppercase italic text-slate-900">Workforce Merit Standings</h3>
+      <div className="space-y-3">
+        {sorted.map((u, i) => (
+          <div key={u.user_id} className="p-6 bg-slate-50 rounded-3xl flex items-center justify-between border">
+            <div className="flex items-center gap-5">
+              <span className="w-8 font-black text-slate-300 text-2xl italic">#{i+1}</span>
+              <img src={u.avatar_url} className="w-10 h-10 rounded-xl object-cover border" alt="" />
+              <p className="font-black text-slate-900">{u.display_name}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-indigo-600 font-black text-2xl">{u.points?.toLocaleString() || 0}</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">XP</span>
+            </div>
+          </div>
+        ))}
       </div>
-      <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-      `}</style>
     </div>
   );
 };

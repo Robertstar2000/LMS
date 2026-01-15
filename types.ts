@@ -1,6 +1,4 @@
-
 export enum UserRole {
-  SUPER_ADMIN = 'Super Admin',
   ADMIN = 'Admin',
   INSTRUCTOR = 'Instructor',
   MANAGER = 'Manager',
@@ -20,12 +18,22 @@ export interface User {
   email: string;
   password?: string;
   avatar_url: string;
-  role: UserRole;
+  roles: UserRole[]; 
   points: number;
   level: number;
   branch_id?: string;
   department?: string;
   last_login?: string;
+}
+
+export interface MentorshipLog {
+  id: string;
+  mentor_id: string;
+  mentee_id: string;
+  mentee_name: string;
+  hours: number;
+  date: string;
+  notes?: string;
 }
 
 export interface Branch {
@@ -87,6 +95,7 @@ export interface Enrollment {
   progress_percent: number;
   status: 'active' | 'completed' | 'dropped';
   completed_lesson_ids?: string[];
+  unit_attempts?: Record<string, number>; // Tracks number of quiz attempts per unit (module_id)
   enrolled_at: string;
 }
 

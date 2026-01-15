@@ -1,8 +1,9 @@
 {
   "name": "Tallman LMS",
-  "description": "A comprehensive, enterprise-grade Learning Management System featuring AI-powered course creation, advanced analytics, and multi-tenant support.",
+  "description": "Enterprise-grade Learning Management System with Gemini-powered curriculum architecture.",
   "requestFramePermissions": [
     "camera",
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }

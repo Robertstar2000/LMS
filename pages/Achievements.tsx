@@ -1,13 +1,17 @@
 
-import React from 'react';
-import { badges, currentUser } from '../data';
+import React, { useState, useEffect } from 'react';
+import { INITIAL_BADGES as badges } from '../backend-data';
+import { User } from '../types';
+import { TallmanAPI } from '../backend-server';
 
 const Achievements: React.FC = () => {
-  const ranking = [
-    { rank: 1, name: 'Richard Tallman', points: 1250, avatar: currentUser.avatar_url },
-    { rank: 2, name: 'Elena Vance', points: 1120, avatar: 'https://picsum.photos/seed/elena/50' },
-    { rank: 3, name: 'Marcus Fenix', points: 980, avatar: 'https://picsum.photos/seed/marcus/50' },
-  ];
+  const [user, setUser] = useState<User | null>(null);
+  
+  useEffect(() => {
+    TallmanAPI.getCurrentSession().then(setUser);
+  }, []);
+
+  if (!user) return null;
 
   return (
     <div className="space-y-12 animate-in fade-in duration-500">
@@ -18,8 +22,8 @@ const Achievements: React.FC = () => {
         </div>
         <div className="flex items-center gap-4">
            <div className="bg-white p-6 rounded-[2.5rem] shadow-sm border text-center min-w-[150px]">
-              <p className="text-[10px] text-slate-400 font-black uppercase mb-1">Global Rank</p>
-              <p className="text-4xl font-black text-indigo-600">#1</p>
+              <p className="text-[10px] text-slate-400 font-black uppercase mb-1">XP Points</p>
+              <p className="text-4xl font-black text-indigo-600">{user.points}</p>
            </div>
         </div>
       </header>
@@ -44,13 +48,13 @@ const Achievements: React.FC = () => {
            <div className="bg-indigo-900 p-12 rounded-[4rem] text-white relative overflow-hidden">
               <div className="absolute right-0 top-0 opacity-10 text-9xl font-black translate-x-10 translate-y-[-20px]">XP</div>
               <h3 className="text-3xl font-black mb-4">Milestone Progress</h3>
-              <p className="text-indigo-200 mb-10 max-w-md">You are only 150 XP away from reaching Level 6 and unlocking the Expert Rigging module.</p>
+              <p className="text-indigo-200 mb-10 max-w-md">Continue mastering industrial SOPs to climb the workforce standings.</p>
               <div className="w-full bg-white/10 h-4 rounded-full overflow-hidden mb-4">
-                 <div className="bg-indigo-400 h-full w-[85%] rounded-full shadow-[0_0_20px_rgba(129,140,248,0.5)]"></div>
+                 <div className="bg-indigo-400 h-full w-[45%] rounded-full shadow-[0_0_20px_rgba(129,140,248,0.5)]"></div>
               </div>
               <div className="flex justify-between text-xs font-black uppercase tracking-widest text-indigo-300">
-                 <span>Level 5 (1250)</span>
-                 <span>Level 6 (1400)</span>
+                 <span>Level {user.level}</span>
+                 <span>Level {user.level + 1}</span>
               </div>
            </div>
         </div>
@@ -58,16 +62,14 @@ const Achievements: React.FC = () => {
         <aside className="bg-white p-10 rounded-[3rem] border shadow-sm">
            <h2 className="text-2xl font-black mb-8">Leaderboard</h2>
            <div className="space-y-6">
-              {ranking.map(r => (
-                <div key={r.rank} className={`flex items-center gap-4 p-4 rounded-2xl transition-all ${r.rank === 1 ? 'bg-indigo-50 border border-indigo-100' : ''}`}>
-                   <span className={`w-6 text-sm font-black ${r.rank === 1 ? 'text-indigo-600' : 'text-slate-300'}`}>0{r.rank}</span>
-                   <img src={r.avatar} className="w-10 h-10 rounded-xl object-cover border" alt="" />
-                   <div className="flex-1">
-                      <p className="text-sm font-black text-slate-900">{r.name}</p>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase">{r.points} PTS</p>
-                   </div>
-                </div>
-              ))}
+              <div className="flex items-center gap-4 p-4 rounded-2xl bg-indigo-50 border border-indigo-100">
+                 <span className="w-6 text-sm font-black text-indigo-600">01</span>
+                 <img src={user.avatar_url} className="w-10 h-10 rounded-xl object-cover border" alt="" />
+                 <div className="flex-1">
+                    <p className="text-sm font-black text-slate-900">{user.display_name}</p>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase">{user.points} PTS</p>
+                 </div>
+              </div>
            </div>
            <button className="w-full mt-8 py-4 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-indigo-600 transition-all">View All Rankings</button>
         </aside>
